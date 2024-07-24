@@ -124,7 +124,7 @@ func overrideTenantURL(current, defaultURL *url.URL, tenant, path string) {
 	}
 }
 
-func getMicrosoftGraphGroupsURL(profileURL *url.URL, graphGroupField string) *url.URL {
+func getMicrosoftGraphGroupsURL(profileURL *url.URL, graphGroupField string, isServicePrincipal bool, oid string) *url.URL {
 
 	selectStatement := "$select=displayName,id"
 	if !slices.Contains([]string{"displayName", "id"}, graphGroupField) {
@@ -132,11 +132,20 @@ func getMicrosoftGraphGroupsURL(profileURL *url.URL, graphGroupField string) *ur
 	}
 
 	// Select only security groups. Due to the filter option, count param is mandatory even if unused otherwise
-	return &url.URL{
-		Scheme:   "https",
-		Host:     profileURL.Host,
-		Path:     "/v1.0/me/transitiveMemberOf",
-		RawQuery: "$count=true&$filter=securityEnabled+eq+true&" + selectStatement,
+	if isServicePrincipal {
+		return &url.URL{
+			Scheme:   "https",
+			Host:     profileURL.Host,
+			Path:     "/v1.0/servicePrincipals/" + oid + "/transitiveMemberOf",
+			RawQuery: "$count=true&$filter=securityEnabled+eq+true&" + selectStatement,
+		}
+	} else {
+		return &url.URL{
+			Scheme:   "https",
+			Host:     profileURL.Host,
+			Path:     "/v1.0/me/transitiveMemberOf",
+			RawQuery: "$count=true&$filter=securityEnabled+eq+true&" + selectStatement,
+		}
 	}
 }
 
@@ -369,7 +378,21 @@ func (p *AzureProvider) getGroupsFromProfileAPI(ctx context.Context, s *sessions
 		return nil, fmt.Errorf("missing access token")
 	}
 
-	groupsURL := getMicrosoftGraphGroupsURL(p.ProfileURL, p.GraphGroupField).String()
+	// Normal session state doesn't have the oid field, so we need to get it from the token
+	extractor, err := p.getClaimExtractor(s.IDToken, s.AccessToken)
+	if err != nil {
+		return nil, err
+	}
+
+	var oid interface{}
+	var hasClaim bool
+	oid, hasClaim, err = extractor.GetClaim("oid")
+	oidStr, ok := oid.(string)
+	if err != nil || !hasClaim || !ok {
+		return nil, fmt.Errorf("unable to get oid claim: %v", err)
+	}
+
+	groupsURL := getMicrosoftGraphGroupsURL(p.ProfileURL, p.GraphGroupField, s.PreferredUsername == "", oidStr).String()
 
 	// Need and extra header while talking with MS Graph. For more context see
 	// https://docs.microsoft.com/en-us/graph/api/group-list-transitivememberof?view=graph-rest-1.0&tabs=http#request-headers
